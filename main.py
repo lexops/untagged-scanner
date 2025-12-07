@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 DESIRED_TAG = os.getenv("DESIRED_TAG", "Foobar")
 ALL_REGIONS = [
     "Global",
+    "us-east-1",
     "us-east-2",
 ]
 
@@ -17,11 +18,12 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(DDB_TABLE_NAME)
 batch_buffer = []
 
+re_client = boto3.client("resource-explorer-2", region_name="us-east-1")
+
 
 def build_item(resource: dict, ttl: int = TTL_SECONDS):
     now = int(datetime.now(timezone.utc).timestamp())
-
-    item = {
+    return {
         "ARN": resource.get("Arn"),
         "AccountId": resource.get("OwningAccountId"),
         "Region": resource.get("Region"),
@@ -30,7 +32,6 @@ def build_item(resource: dict, ttl: int = TTL_SECONDS):
         "LastSeen": now,
         "ExpireAt": now + ttl,
     }
-    return item
 
 
 def flush_batch():
@@ -45,9 +46,7 @@ def flush_batch():
         response = dynamodb.batch_write_item(RequestItems=request_items)
         unprocessed = response.get("UnprocessedItems", {}).get(DDB_TABLE_NAME, [])
         if unprocessed:
-            print(
-                f"Warning: {len(unprocessed)} items unprocessed"
-            )
+            print(f"Warning: {len(unprocessed)} items unprocessed")
     except Exception as e:
         print(f"Failed to batch write {len(batch_buffer)} items: {e}")
 
@@ -61,14 +60,11 @@ def write_to_dynamodb(item):
 
 
 def get_resources_without_tag_in_region(tag_key, region):
-    client_region = "us-east-1" if region == "Global" else region
-    client = boto3.client("resource-explorer-2", region_name=client_region)
-
     query = f"resourcetype.supports:tags -tag.key:{tag_key} region:{region}"
 
     count = 0
     try:
-        paginator = client.get_paginator("search")
+        paginator = re_client.get_paginator("search")
         for page in paginator.paginate(
             QueryString=query, PaginationConfig={"PageSize": 100}
         ):
@@ -76,11 +72,13 @@ def get_resources_without_tag_in_region(tag_key, region):
                 item = build_item(resource)
                 write_to_dynamodb(item)
                 count += 1
+
     except ClientError as e:
         if e.response["Error"]["Code"] == "AccessDeniedException":
             print(f"Access denied in {region} (skipping)")
         else:
             print(f"Error in {region}: {e}")
+
     return count
 
 
